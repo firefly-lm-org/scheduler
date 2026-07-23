@@ -1,6 +1,5 @@
 name: CI · Scheduler
-on:
-  push:
+on:\n  workflow_dispatch:\n    push:
     branches: [main]
     paths: ["scheduler/**"]
   pull_request:
