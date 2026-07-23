@@ -1,80 +1,119 @@
-"""后台任务：超时回收 + 离线检测 + 信誉恢复."""
-import asyncio, logging, uuid
-from datetime import datetime, timedelta, timezone
+"""
+firefly-scheduler · Background Tasks
+周期性任务：超时回收 / 心跳检测 / 信誉恢复
+"""
+import asyncio
+from datetime import datetime, timedelta
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import get_settings
-from app.database import AsyncSessionLocal
-from app.models.task import Task, TaskStatus
-from app.models.node import Node, NodeStatus
+from app.database import engine
+from app.models.task import Task
+from app.models.node import Node
+from app.config import settings
 
-settings = get_settings()
-logger = logging.getLogger(__name__)
-
-
-async def _db():
-    async with AsyncSessionLocal() as s:
-        return s
+# 独立会话工厂（后台任务用）
+BackgroundSession = async_sessionmaker(engine, expire_on_commit=False)
 
 
-async def reclaim_timed_out_tasks() -> int:
-    """将超时的 running 任务回退为 pending，释放节点锁."""
-    async with AsyncSessionLocal() as s:
-        cutoff = datetime.now(timezone.utc) - timedelta(seconds=settings.task_run_ttl_sec)
-        result = await s.execute(
-            update(Task)
-            .where(Task.status == TaskStatus.RUNNING, Task.started_at < cutoff)
-            .values(status=TaskStatus.PENDING, claimed_by_node_id=None, claimed_by_user_id=None,
-                    started_at=None, running_lock_key=None)
-        )
-        await s.commit()
-        n = result.rowcount
-        if n:
-            logger.warning("Reclaimed %d timed-out running tasks", n)
-        return n
-
-
-async def detect_offline_nodes() -> int:
-    """心跳超时 → offline."""
-    async with AsyncSessionLocal() as s:
-        cutoff = datetime.now(timezone.utc) - timedelta(seconds=settings.node_offline_sec)
-        result = await s.execute(
-            update(Node)
-            .where(Node.status == NodeStatus.ONLINE, Node.last_heartbeat < cutoff)
-            .values(status=NodeStatus.OFFLINE)
-        )
-        await s.commit()
-        n = result.rowcount
-        if n:
-            logger.info("Marked %d nodes offline", n)
-        return n
-
-
-async def recover_node_reputation() -> int:
-    """每6h恢复节点信誉分，上限100."""
-    async with AsyncSessionLocal() as s:
-        result = await s.execute(
-            select(Node).where(Node.reputation_score < 100.0)
-        )
-        nodes = result.scalars().all()
-        count = 0
-        for node in nodes:
-            node.reputation_score = min(100.0, node.reputation_score + 1.0)
-            count += 1
-        await s.commit()
-        if count:
-            logger.info("Recovered reputation for %d nodes", count)
-        return count
-
-
-async def background_scheduler_loop():
-    """每60s 执行一次清理扫描."""
+# ─────────────────────────────────────
+# 任务1：超时任务回收
+# 每 60 秒扫描一次 claimed/running 超过 timeout 的任务
+# ─────────────────────────────────────
+async def timeout_reclaimer():
+    """将超时的任务释放回 pending 队列"""
     while True:
         try:
-            await reclaim_timed_out_tasks()
-            await detect_offline_nodes()
-            await recover_node_reputation()
-        except Exception as exc:
-            logger.error("Background task error: %s", exc)
+            async with BackgroundSession() as db:
+                timeout_threshold = datetime.utcnow() - timedelta(seconds=settings.task_heartbeat_timeout * 2)
+                # 查找超时任务
+                result = await db.execute(
+                    select(Task).where(
+                        Task.status.in_(["claimed", "running"]),
+                        Task.claimed_at < timeout_threshold,
+                    ).limit(50)
+                )
+                expired_tasks = result.scalars().all()
+
+                for task in expired_tasks:
+                    task.retry_count += 1
+                    if task.retry_count >= task.max_retries:
+                        task.status = "failed"
+                    else:
+                        task.status = "pending"
+                        task.claimed_by = None
+                        task.claimed_at = None
+                    await db.flush()
+
+                if expired_tasks:
+                    print(f"[Reclaimer] Reclaimed {len(expired_tasks)} timed-out tasks")
+
+                await db.commit()
+        except Exception as e:
+            print(f"[Reclaimer] Error: {e}")
+
         await asyncio.sleep(60)
+
+
+# ─────────────────────────────────────
+# 任务2：离线节点检测
+# 每 30 秒检测 Redis 心跳，超时则标记 offline
+# ─────────────────────────────────────
+async def offline_detector():
+    """心跳超时 → 标记节点 offline（不扣信誉分）"""
+    import redis.asyncio as redis
+    r = redis.from_url(settings.redis_url, decode_responses=True)
+
+    while True:
+        try:
+            async with BackgroundSession() as db:
+                # 查找所有 online/busy 节点
+                result = await db.execute(
+                    select(Node).where(Node.status.in_(["online", "busy"]))
+                )
+                nodes = result.scalars().all()
+
+                for node in nodes:
+                    exists = await r.exists(f"node:heartbeat:{node.id}")
+                    if not exists:
+                        node.status = "offline"
+                        await db.flush()
+
+                await db.commit()
+        except Exception as e:
+            print(f"[OfflineDetector] Error: {e}")
+
+        await asyncio.sleep(30)
+
+
+# ─────────────────────────────────────
+# 任务3：信誉分恢复
+# 每 6 小时，连续完成 10 个任务的节点 +1 信誉分（上限 100）
+# ─────────────────────────────────────
+async def reputation_recovery():
+    """信誉分缓慢恢复机制"""
+    while True:
+        try:
+            async with BackgroundSession() as db:
+                # 查找信誉分 < 100 且近期有完成记录的节点
+                result = await db.execute(
+                    select(Node).where(
+                        Node.reputation_score < 100,
+                        Node.total_tasks_completed >= 10,
+                    ).limit(50)
+                )
+                nodes = result.scalars().all()
+
+                for node in nodes:
+                    node.reputation_score = min(100, node.reputation_score + 1)
+                    await db.flush()
+
+                if nodes:
+                    print(f"[Reputation] Recovered {len(nodes)} nodes")
+
+                await db.commit()
+        except Exception as e:
+            print(f"[Reputation] Error: {e}")
+
+        # 6 小时
+        await asyncio.sleep(6 * 3600)

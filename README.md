@@ -1,95 +1,127 @@
-# Firefly Scheduler
+# Firefly Scheduler · 萤火虫调度中心
 
-> 萤火虫大模型 · 分布式志愿算力调度中心 v0.1
+> v0.1 · 2024
 
-## 概述
+## 项目概述
 
-调度中心为参与分布式训练的志愿者节点提供任务分发、状态追踪和贡献积分管理。
+萤火虫大模型分布式志愿算力调度中心。志愿者节点注册后领取训练任务，提交结果后获得贡献积分。
 
 ## 技术栈
 
 | 组件 | 技术 |
-|---|---|
+|------|------|
 | API | FastAPI (async) |
 | Database | PostgreSQL 15 + SQLAlchemy 2.0 (async) |
 | Cache / Lock | Redis 7 |
 | Object Storage | MinIO (S3-compatible) |
-| Auth | JWT (python-jose + passlib/bcrypt) |
-| Background | asyncio background tasks |
+| Auth | JWT + bcrypt |
 
-## 快速开始
+## 快速启动
 
-### Docker Compose（一键启动）
-
-```bash
+`ash
+# 克隆
 git clone https://github.com/firefly-lm-org/scheduler.git
 cd scheduler
-cp .env.example .env        # 务必修改 JWT_SECRET_KEY
+
+# 启动全部服务
 docker compose up -d
-```
 
-访问 `http://localhost:8000/docs` 查看 API 文档。
+# 查看日志
+docker compose logs -f api
 
-### 本地开发
+# 打开 API 文档
+open http://localhost:8000/docs
+`
 
-```bash
-pip install -r requirements.txt
-cp .env.example .env         # 修改 JWT_SECRET_KEY
-uvicorn app.main:app --reload --port 8000
-```
+## 环境变量
 
-## API 概览
+参考 .env.example。关键变量：
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| DATABASE_URL | postgresql+asyncpg://firefly:firefly123@db:5432/firefly | 数据库连接 |
+| REDIS_URL | edis://redis:6379/0 | Redis |
+| MINIO_ENDPOINT | minio:9000 | MinIO |
+| JWT_SECRET | change-me... | JWT 密钥（必须修改） |
+| JWT_ACCESS_EXPIRE | 86400 | Access Token 有效期（秒） |
+| TASK_HEARTBEAT_TIMEOUT | 90 | 心跳超时（秒） |
+| TASK_MAX_RETRIES | 3 | 任务最大重试次数 |
+
+## API 路由
 
 ### 认证
 
-```
-POST /api/v1/auth/register   — 注册
-POST /api/v1/auth/login      — 登录（拿 JWT）
-POST /api/v1/auth/refresh    — 刷新 Token
-```
+`
+POST /api/v1/auth/register   注册（自动签发 Token）
+POST /api/v1/auth/login       登录
+POST /api/v1/auth/refresh    刷新 Token
+`
 
 ### 节点
 
-```
-POST /api/v1/node/register   — 注册节点（自动等级评定）
-POST /api/v1/node/heartbeat  — 心跳（30s 一次）
-GET  /api/v1/node/me        — 我的节点列表
-```
+`
+POST /api/v1/node/register    注册节点（自动评级 L1-L3）
+POST /api/v1/node/heartbeat   心跳（建议 30s 一次）
+GET  /api/v1/node/me         我的节点列表
+`
 
 ### 任务
 
-```
-GET  /api/v1/task/available  — 可领取任务列表
-POST /api/v1/task/claim      — 乐观锁领取任务
-POST /api/v1/task/progress  — 更新进度（延长 running TTL）
-POST /api/v1/task/submit     — 提交结果 + 结算积分
-```
+`
+POST /api/v1/task/claim      领取任务（Redis SETNX 乐观锁）
+POST /api/v1/task/progress    上报训练进度
+POST /api/v1/task/submit     提交结果（SHA256 校验）
+GET  /api/v1/task/{id}       查询任务状态
+`
 
 ### 管理
 
-```
-POST /api/v1/admin/tasks      — 手动创建任务
-GET  /api/v1/admin/stats      — 全局统计
-POST /api/v1/admin/tasks/reset-failed — 重置失败任务
-```
+`
+POST /api/v1/admin/tasks           创建任务
+GET  /api/v1/admin/stats           全局统计
+POST /api/v1/admin/tasks/reset    重置失败任务
+`
 
 ## 任务状态机
 
-```
-pending → running → completed
-              ↓
-            failed → (≤3 retry) → pending
-```
+`
+pending → claimed → running → completed
+                        ↓
+                      failed → (≤3 retry) → pending
+`
 
-## 核心能力
+## 后台守护
 
-- ✅ 用户注册/登录/Token 刷新（bcrypt + JWT）
-- ✅ 节点注册（自动等级 L1-L3）+ 心跳（Redis 滑动窗口限频）
-- ✅ 任务乐观锁领取（Redis SETNX + PostgreSQL FOR UPDATE）
-- ✅ 进度心跳（自动延长 running TTL）
-- ✅ 结果提交（SHA256 校验 + MinIO 预签名 URL）
-- ✅ 后台清理：超时回收 / 离线检测 / 信誉恢复
-- ✅ 积分原子结算（SELECT FOR UPDATE 行锁）
+- **超时回收**：每 60s 扫描 claimed/running 超时任务，回退到 pending
+- **离线检测**：每 30s 检测 Redis 心跳，超时标记 offline
+- **信誉恢复**：每 6h 为近 10 个任务节点恢复 +1 信誉分（上限 100）
+
+## 目录结构
+
+`
+app/
+├── config.py           配置管理（.env + 环境变量）
+├── database.py        SQLAlchemy 异步引擎
+├── main.py            FastAPI 入口 + 生命周期
+├── models/            ORM 模型
+│   ├── user.py
+│   ├── node.py
+│   ├── task.py
+│   └── contribution.py
+├── schemas/           Pydantic 请求/响应
+├── routers/           API 路由
+│   ├── auth.py
+│   ├── node.py
+│   ├── task.py
+│   └── admin.py
+├── services/          业务逻辑
+│   ├── contribution_service.py
+│   └── background_tasks.py
+└── utils/
+    ├── security.py       JWT + bcrypt
+    ├── redis_client.py  分布式锁 + 心跳
+    └── minio_client.py  对象存储
+`
 
 ## License
 

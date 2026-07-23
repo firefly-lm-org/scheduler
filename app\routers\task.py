@@ -1,180 +1,264 @@
-"""task 路由：任务领取 + 进度更新 + 结果提交."""
+"""
+firefly-scheduler · Router · Task
+任务领取 / 进度上报 / 结果提交 / 状态查询
+"""
 import uuid
-from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import select, and_
+import time
+import json
+from datetime import datetime, timedelta
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, update
 
 from app.database import get_db
-from app.models.task import Task, TaskStatus
-from app.models.node import Node, NodeStatus
+from app.models.task import Task
+from app.models.node import Node
+from app.models.user import User
 from app.schemas.task import (
-    TaskCreateRequest, TaskClaimResponse, TaskProgressRequest, TaskSubmitRequest, TaskRead
+    TaskClaimResponse, TaskProgressRequest,
+    TaskSubmitRequest, TaskResponse,
 )
 from app.utils.security import decode_token
-from app.utils.redis_client import get_redis, RedisLock, RateLimiter
-from app.services.contribution_service import settle_contribution
-from app.config import get_settings
+from app.utils.redis_client import (
+    acquire_lock, release_lock, check_claim_rate,
+    set_heartbeat,
+)
+from app.utils.minio_client import get_presigned_download_url
+from app.config import settings
 
-router = APIRouter(prefix="/task", tags=["task"])
-settings_cfg = get_settings()
+router = APIRouter(prefix="/api/v1/task", tags=["Task"])
+bearer = HTTPBearer()
 
-
-def _user_from_header(request: Request) -> dict:
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
-        raise HTTPException(401, "Missing Authorization header")
-    payload = decode_token(auth[7:])
-    if not payload:
-        raise HTTPException(401, "Invalid token")
-    return payload
+TASK_LOCK_PREFIX = "task:lock:"
+CLAIM_PREFIX = "node:claim:"
 
 
-async def _check_rate_limit(redis_client, user_id: str, action: str):
-    key = f"ratelimit:{action}:{user_id}"
-    limit = settings_cfg.rate_limit_claim_per_min
-    limiter = RateLimiter(redis_client, key, limit)
-    if not await limiter.is_allowed():
-        raise HTTPException(429, f"{action} 频率超限，请稍后再试")
-
-
-@router.get("/available")
-async def list_available_tasks(
-    request: Request,
+# ── 获取当前用户 ──────────────────────
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(bearer),
     db: AsyncSession = Depends(get_db),
-):
+) -> User:
+    payload = decode_token(credentials.credentials)
+    if payload.get("type") != "access":
+        raise HTTPException(status_code=401, detail="Invalid token type")
+    result = await db.execute(select(User).where(User.id == payload["sub"]))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+
+# ── 获取用户活跃节点 ──────────────────
+async def get_active_node(user: User, db: AsyncSession) -> Node:
     result = await db.execute(
-        select(Task).where(Task.status == TaskStatus.PENDING).order_by(Task.created_at).limit(20)
+        select(Node).where(
+            Node.user_id == user.id,
+            Node.is_banned == False,
+        ).limit(1)
     )
-    tasks = result.scalars().all()
-    return [
-        TaskRead(
-            id=str(t.id), name=t.name, level=t.level, base_contribution=t.base_contribution,
-            status=t.status.value, claimed_by_node_id=str(t.claimed_by_node_id) if t.claimed_by_node_id else None,
-            claimed_by_user_id=str(t.claimed_by_user_id) if t.claimed_by_user_id else None,
-            result_url=t.result_url, result_hash=t.result_hash, retry_count=t.retry_count,
-            timeout_sec=t.timeout_sec, created_at=t.created_at, started_at=t.started_at,
-            completed_at=t.completed_at,
-        )
-        for t in tasks
-    ]
+    node = result.scalar_one_or_none()
+    if not node:
+        raise HTTPException(status_code=404, detail="No active node found")
+    return node
 
 
+# ─────────────────────────────────────
+# POST /claim  节点领取任务
+# ─────────────────────────────────────
 @router.post("/claim", response_model=TaskClaimResponse)
 async def claim_task(
-    request: Request,
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    payload = _user_from_header(request)
-    user_id = uuid.UUID(payload["sub"])
+    """节点领取一个最合适的待分配任务"""
+    node = await get_active_node(user, db)
 
-    async with get_redis() as r:
-        await _check_rate_limit(r, payload["sub"], "claim")
-        # Find a pending task
-        result = await db.execute(
-            select(Task, Node)
-            .join(Node, Task.claimed_by_node_id == None)
-            .where(Task.status == TaskStatus.PENDING)
-            .order_by(Task.created_at)
-            .limit(1)
+    # 1. 频率限制
+    if not await check_claim_rate(node.id):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Claim too frequent, please wait",
         )
-        row = result.first()
-        if not row:
-            raise HTTPException(404, "暂无可领取任务")
-        task, node = row
 
-        # Redis 乐观锁
-        lock_key = f"lock:claim:{task.id}"
-        lock = RedisLock(r, lock_key, ttl_sec=settings_cfg.task_claim_ttl_sec)
-        if not await lock.acquire():
-            raise HTTPException(409, "任务已被其他节点抢先")
+    # 2. 节点必须在线
+    if node.status != "online":
+        raise HTTPException(status_code=400, detail="Node is not online")
 
-        try:
-            # DB 行锁
-            await db.execute(
-                select(Task).where(Task.id == task.id).with_for_update()
+    # 3. 查询候选任务（乐观锁抢占）
+    candidate = await db.execute(
+        select(Task).where(
+            Task.status == "pending",
+            Task.level <= node.max_task_level,
+            Task.retry_count < Task.max_retries,
+        ).order_by(Task.created_at.asc()).limit(5)
+    )
+    tasks = candidate.scalars().all()
+
+    claimed_task = None
+    for task in tasks:
+        lock_key = f"{TASK_LOCK_PREFIX}{task.id}"
+        if await acquire_lock(lock_key, expire=5):
+            # 原子更新：仅当 status 仍为 pending 时
+            result = await db.execute(
+                update(Task).where(
+                    Task.id == task.id,
+                    Task.status == "pending",
+                ).values(
+                    status="claimed",
+                    claimed_by=node.id,
+                    claimed_at=datetime.utcnow(),
+                ).returning(Task)
             )
-            fresh = (await db.execute(select(Task).where(Task.id == task.id))).scalar_one()
-            if fresh.status != TaskStatus.PENDING:
-                raise HTTPException(409, "任务状态已变化")
+            updated = result.scalar_one_or_none()
+            if updated:
+                claimed_task = updated
+                await db.flush()
+                break
+            await release_lock(lock_key)
 
-            running_key = f"lock:running:{task.id}"
-            fresh.status = TaskStatus.RUNNING
-            fresh.claimed_by_user_id = user_id
-            fresh.claimed_by_node_id = node.id
-            fresh.started_at = datetime.now(timezone.utc)
-            fresh.running_lock_key = running_key
-            await db.commit()
+    if not claimed_task:
+        raise HTTPException(status_code=404, detail="No available tasks")
 
-            return TaskClaimResponse(
-                task_id=str(task.id), name=task.name, level=task.level,
-                base_contribution=task.base_contribution, timeout_sec=task.timeout_sec,
-                config=task.config, started_at=fresh.started_at,
-            )
-        except HTTPException:
-            await db.rollback()
-            raise
-        finally:
-            await lock.release()
+    # 4. 更新节点状态 + 心跳
+    node.status = "busy"
+    await set_heartbeat(node.id)
+
+    # 5. 生成预签名下载 URL
+    config = json.loads(claimed_task.config_json or "{}")
+    download_url = await get_presigned_download_url(
+        claimed_task.task_package_url or f"tasks/{claimed_task.id}/package.zip",
+        expires_sec=3600,
+    )
+    deadline = datetime.utcnow() + timedelta(seconds=claimed_task.timeout_sec)
+
+    return TaskClaimResponse(
+        task_id=claimed_task.id,
+        task_name=claimed_task.name,
+        task_level=claimed_task.level,
+        task_package_url=download_url,
+        config=config,
+        deadline=deadline,
+    )
 
 
+# ─────────────────────────────────────
+# POST /progress  节点上报进度
+# ─────────────────────────────────────
 @router.post("/progress")
-async def update_progress(
+async def report_progress(
     body: TaskProgressRequest,
-    request: Request,
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    payload = _user_from_header(request)
-    user_id = uuid.UUID(payload["sub"])
+    """节点定期上报训练进度（每 60 秒）"""
+    node = await get_active_node(user, db)
 
+    # 查找该节点正在执行的任务
     result = await db.execute(
-        select(Task).where(Task.id == uuid.UUID(body.task_id)).with_for_update()
+        select(Task).where(
+            Task.claimed_by == node.id,
+            Task.status.in_(["claimed", "running"]),
+        ).limit(1)
     )
-    task: Task | None = result.scalar_one_or_none()
+    task = result.scalar_one_or_none()
     if not task:
-        raise HTTPException(404, "任务不存在")
-    if task.claimed_by_user_id != user_id:
-        raise HTTPException(403, "不是你的任务")
+        raise HTTPException(status_code=404, detail="No active task found")
 
-    async with get_redis() as r:
-        running_key = f"lock:running:{task.id}"
-        lock = RedisLock(r, running_key, ttl_sec=settings_cfg.task_run_ttl_sec)
-        await lock.extend(settings_cfg.task_run_ttl_sec)
+    # 更新状态和心跳
+    task.status = "running"
+    await set_heartbeat(node.id)
 
-    return {"ok": True, "progress_pct": body.progress_pct}
+    # TODO: 进度写入 Redis 供监控面板读取
+    progress_pct = (body.current_step / max(body.total_steps, 1)) * 100
+
+    return {
+        "status": "ok",
+        "task_id": task.id,
+        "progress_pct": round(progress_pct, 1),
+    }
 
 
+# ─────────────────────────────────────
+# POST /submit  节点提交结果
+# ─────────────────────────────────────
 @router.post("/submit")
-async def submit_result(
+async def submit_task(
     body: TaskSubmitRequest,
-    request: Request,
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    payload = _user_from_header(request)
-    user_id = uuid.UUID(payload["sub"])
+    """
+    节点提交训练结果
+    进入校验队列（v0.1 仅做格式校验，后续版本加质量评估）
+    """
+    node = await get_active_node(user, db)
 
+    # 查找该节点的进行中任务
     result = await db.execute(
-        select(Task).where(Task.id == uuid.UUID(body.task_id)).with_for_update()
+        select(Task).where(
+            Task.claimed_by == node.id,
+            Task.status.in_(["claimed", "running"]),
+        ).limit(1)
     )
-    task: Task | None = result.scalar_one_or_none()
+    task = result.scalar_one_or_none()
     if not task:
-        raise HTTPException(404, "任务不存在")
-    if task.claimed_by_user_id != user_id:
-        raise HTTPException(403, "不是你的任务")
-    if task.status not in (TaskStatus.RUNNING, TaskStatus.PENDING):
-        raise HTTPException(409, f"任务状态不允许提交: {task.status.value}")
+        raise HTTPException(status_code=404, detail="No active task to submit")
 
-    task.status = TaskStatus.COMPLETED
-    task.result_url = body.result_url
-    task.result_hash = body.result_hash
-    task.completed_at = datetime.now(timezone.utc)
+    # ── 一级校验：格式与完整性（v0.1 简化版） ──
+    if not body.result_object_name:
+        # 驳回：扣信誉分 + 任务回退
+        node.reputation_score = max(0, node.reputation_score - 10)
+        task.retry_count += 1
+        if task.retry_count >= task.max_retries:
+            task.status = "failed"
+        else:
+            task.status = "pending"
+            task.claimed_by = None
+        await db.flush()
+        raise HTTPException(status_code=400, detail="Result file missing")
 
-    await settle_contribution(
-        session=db,
-        user_id=user_id,
+    # 校验通过 → 标记完成，等待异步校验
+    task.status = "completed"
+    task.result_object_name = body.result_object_name
+    task.result_sha256 = body.result_sha256
+    task.completed_at = datetime.utcnow()
+
+    # 节点统计更新
+    node.total_tasks_completed += 1
+    node.status = "online"
+    await set_heartbeat(node.id)
+
+    await db.flush()
+
+    # TODO: v0.5 接入二级/三级校验 + 贡献值结算
+    # 当前 v0.1 直接给基础贡献值
+    # （结算逻辑放在 services/contribution_service.py）
+
+    return {
+        "status": "accepted",
+        "task_id": task.id,
+        "message": "Result submitted, pending validation",
+    }
+
+
+# ─────────────────────────────────────
+# GET /{task_id}  查询任务状态
+# ─────────────────────────────────────
+@router.get("/{task_id}", response_model=TaskResponse)
+async def get_task(task_id: str, db: AsyncSession = Depends(get_db)):
+    """查询任务当前状态"""
+    result = await db.execute(select(Task).where(Task.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    return TaskResponse(
         task_id=task.id,
-        amount=task.base_contribution,
-        reason=f"任务完成: {task.name}",
+        status=task.status,
+        level=task.level,
+        claimed_by=task.claimed_by,
+        retry_count=task.retry_count,
+        created_at=task.created_at,
+        completed_at=task.completed_at,
     )
-    await db.commit()
-    return {"ok": True, "contribution_earned": task.base_contribution}

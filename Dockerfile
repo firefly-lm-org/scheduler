@@ -1,13 +1,20 @@
-FROM python:3.11-slim AS builder
+# ── 基础镜像 ────────────────────────
+FROM python:3.12-slim
+
+# ── 环境变量 ────────────────────────
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# ── 安装依赖 ────────────────────────
 WORKDIR /app
-RUN pip install --no-cache-dir poetry
-COPY pyproject.toml poetry.lock* ./
-RUN poetry export -f requirements.txt --output requirements.txt --without-hashes || true
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-FROM python:3.11-slim
-WORKDIR /app
-COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+# ── 复制代码 ────────────────────────
 COPY . .
+
+# ── 暴露端口 ────────────────────────
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# ── 启动命令（开发模式 + 热重载） ──
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

@@ -1,61 +1,89 @@
-"""auth 路由：注册/登录/刷新 Token."""
+"""
+firefly-scheduler · Router · Auth
+注册 / 登录 / Token 刷新
+"""
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.user import User
-from app.schemas.auth import UserRegister, UserLogin, TokenResponse, RefreshRequest, UserRead
+from app.schemas.auth import RegisterRequest, LoginRequest, TokenResponse, RefreshRequest
 from app.utils.security import hash_password, verify_password, create_access_token, create_refresh_token, decode_token
 
-router = APIRouter(prefix="/auth", tags=["auth"])
+router = APIRouter(prefix="/api/v1/auth", tags=["Auth"])
 
 
-def _token_payload(user_id: uuid.UUID, username: str) -> dict:
-    return {"sub": str(user_id), "username": username}
+@router.post("/register", response_model=TokenResponse)
+async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
+    """用户注册，自动签发 token"""
+    # 检查用户名是否已存在
+    existing = await db.execute(
+        User.__table__.select().where(User.username == body.username)
+    )
+    if existing.first():
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already exists")
 
-
-@router.post("/register", status_code=status.HTTP_201_CREATED)
-async def register(body: UserRegister, db: AsyncSession = Depends(get_db)):
-    existing = await db.execute(select(User).where(User.username == body.username))
-    if existing.scalar_one_or_none():
-        raise HTTPException(status_code=409, detail="用户名已存在")
-
-    user = User(username=body.username, password_hash=hash_password(body.password))
+    user = User(
+        id=str(uuid.uuid4()),
+        username=body.username,
+        password_hash=hash_password(body.password),
+        total_contribution=0,
+    )
     db.add(user)
-    await db.commit()
-    await db.refresh(user)
-    return {"id": str(user.id), "username": user.username}
+    await db.flush()
+
+    access = create_access_token(user.id, user.username)
+    refresh = create_refresh_token(user.id)
+
+    return TokenResponse(
+        access_token=access,
+        refresh_token=refresh,
+        user_id=user.id,
+        username=user.username,
+    )
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(body: UserLogin, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(User).where(User.username == body.username))
-    user: User | None = result.scalar_one_or_none()
+async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
+    """用户登录"""
+    result = await db.execute(
+        User.__table__.select().where(User.username == body.username)
+    )
+    user = result.first()
     if not user or not verify_password(body.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="用户名或密码错误")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
-    payload = _token_payload(user.id, user.username)
+    access = create_access_token(user.id, user.username)
+    refresh = create_refresh_token(user.id)
+
     return TokenResponse(
-        access_token=create_access_token(payload),
-        refresh_token=create_refresh_token(payload),
+        access_token=access,
+        refresh_token=refresh,
+        user_id=user.id,
+        username=user.username,
     )
 
 
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh(body: RefreshRequest, db: AsyncSession = Depends(get_db)):
+    """用 refresh_token 换取新的 access_token"""
     payload = decode_token(body.refresh_token)
-    if not payload or payload.get("type") != "refresh":
-        raise HTTPException(status_code=401, detail="无效的 refresh token")
+    if payload.get("type") != "refresh":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
 
-    result = await db.execute(select(User).where(User.id == uuid.UUID(payload["sub"])))
-    user: User | None = result.scalar_one_or_none()
+    user_id = payload["sub"]
+    result = await db.execute(
+        User.__table__.select().where(User.id == user_id)
+    )
+    user = result.first()
     if not user:
-        raise HTTPException(status_code=404, detail="用户不存在")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-    new_payload = _token_payload(user.id, user.username)
+    access = create_access_token(user.id, user.username)
     return TokenResponse(
-        access_token=create_access_token(new_payload),
-        refresh_token=create_refresh_token(new_payload),
+        access_token=access,
+        refresh_token=body.refresh_token,  # 不刷新 refresh
+        user_id=user.id,
+        username=user.username,
     )

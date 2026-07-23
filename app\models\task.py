@@ -1,51 +1,45 @@
-"""tasks 表：训练任务状态机载体."""
-import uuid
-from datetime import datetime
-from enum import Enum
-from sqlalchemy import String, Integer, Float, DateTime, ForeignKey, Text, Enum as SAEnum, JSON
-from sqlalchemy.dialects.postgresql import UUID
+"""
+firefly-scheduler · ORM · Task
+"""
+from sqlalchemy import String, Integer, DateTime, Float, Text, Boolean, func
 from sqlalchemy.orm import Mapped, mapped_column
-
 from app.database import Base
-
-
-class TaskStatus(str, Enum):
-    PENDING = "pending"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
 
 
 class Task(Base):
     __tablename__ = "tasks"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    name: Mapped[str] = mapped_column(String(200), nullable=False)
-    level: Mapped[int] = mapped_column(Integer, default=1)          # 1-3
-    base_contribution: Mapped[int] = mapped_column(Integer, default=10)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, comment="UUID")
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    level: Mapped[int] = mapped_column(default=1, nullable=False, comment="1=L1轻量 2=L2中量 3=L3重量")
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True,
+                                         comment="pending/claimed/running/completed/failed/archived")
 
-    status: Mapped[TaskStatus] = mapped_column(
-        SAEnum(TaskStatus), default=TaskStatus.PENDING, server_default="pending"
-    )
+    # ── 领取与执行 ──
+    claimed_by: Mapped[Optional[str]] = mapped_column(String(36), index=True, nullable=True)
+    claimed_at: Mapped[Optional[DateTime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[Optional[DateTime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[Optional[DateTime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    # Redis key holders (for cleanup / TTL tracking)
-    claim_lock_key: Mapped[str] = mapped_column(String(255), nullable=True)
-    running_lock_key: Mapped[str] = mapped_column(String(255), nullable=True)
+    # ── 重试与超时 ──
+    retry_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    max_retries: Mapped[int] = mapped_column(default=3, nullable=False)
+    timeout_sec: Mapped[int] = mapped_column(default=3600, comment="任务超时秒数")
 
-    # Who holds this task
-    claimed_by_node_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("nodes.id"), nullable=True)
-    claimed_by_user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    # ── 贡献与配置 ──
+    base_contribution: Mapped[int] = mapped_column(default=10, comment="基础贡献值")
+    config_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="训练超参数 JSON")
 
-    # Result
-    result_url: Mapped[str] = mapped_column(Text, nullable=True)
-    result_hash: Mapped[str] = mapped_column(String(64), nullable=True)   # SHA256
-    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    # ── 任务包与结果 ──
+    task_package_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    result_object_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    result_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
-    # Timing
-    timeout_sec: Mapped[int] = mapped_column(Integer, default=3600)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    started_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
-    completed_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    # ── 校验结果 ──
+    quality_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="三级校验质量系数")
+    validation_passed: Mapped[bool] = mapped_column(default=False)
 
-    # Admin metadata
-    config: Mapped[dict] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    def __repr__(self) -> str:
+        return f"<Task {self.id} level={self.level} status={self.status}>"

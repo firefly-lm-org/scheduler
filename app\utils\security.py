@@ -1,42 +1,58 @@
-"""security 工具：bcrypt 密码 + JWT 签发/验证."""
-from datetime import datetime, timedelta, timezone
-from typing import Any
-from jose import JWTError, jwt
+"""
+firefly-scheduler · 安全工具
+JWT 签发/验证 + 密码哈希
+"""
+import time
+import jwt
 from passlib.context import CryptContext
+from fastapi import HTTPException, status
 
-from app.config import get_settings
+from app.config import settings
 
-settings = get_settings()
-pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-ALGORITHM = "HS256"
+# ── 密码哈希 ──────────────────────────
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 def hash_password(password: str) -> str:
-    return pwd_ctx.hash(password)
+    """明文密码 → bcrypt 哈希"""
+    return pwd_context.hash(password)
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_ctx.verify(plain, hashed)
+    """校验明文密码与哈希是否匹配"""
+    return pwd_context.verify(plain, hashed)
 
 
-def create_access_token(data: dict[str, Any], expires_delta: timedelta | None = None) -> str:
-    to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=settings.jwt.access_expire_minutes))
-    to_encode.update({"exp": expire, "type": "access"})
-    return jwt.encode(to_encode, settings.jwt.secret_key, algorithm=ALGORITHM)
+# ── JWT ────────────────────────────────
+def create_access_token(user_id: str, username: str) -> str:
+    """签发 access_token（默认 24 小时）"""
+    payload = {
+        "sub": user_id,
+        "username": username,
+        "type": "access",
+        "iat": int(time.time()),
+        "exp": int(time.time()) + settings.jwt_access_expire,
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
 
 
-def create_refresh_token(data: dict[str, Any]) -> str:
-    to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + timedelta(days=settings.jwt.refresh_expire_days)
-    to_encode.update({"exp": expire, "type": "refresh"})
-    return jwt.encode(to_encode, settings.jwt.secret_key, algorithm=ALGORITHM)
+def create_refresh_token(user_id: str) -> str:
+    """签发 refresh_token（默认 7 天）"""
+    payload = {
+        "sub": user_id,
+        "type": "refresh",
+        "iat": int(time.time()),
+        "exp": int(time.time()) + settings.jwt_refresh_expire,
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
 
 
-def decode_token(token: str) -> dict[str, Any] | None:
+def decode_token(token: str) -> dict:
+    """解码并验证 JWT，失败抛 401"""
     try:
-        payload = jwt.decode(token, settings.jwt.secret_key, algorithms=[ALGORITHM])
-        return payload if payload.get("exp", 0) > datetime.now(timezone.utc).timestamp() else None
-    except JWTError:
-        return None
+        return jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")

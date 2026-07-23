@@ -1,79 +1,62 @@
-"""Redis 客户端：分布式锁 + 心跳缓存 + 频率限制."""
-import time
-import logging
-from contextlib import asynccontextmanager
-from typing import AsyncGenerator
-
+"""
+firefly-scheduler · Redis 工具
+连接池 + 常用操作封装（分布式锁、心跳缓存、频率限制）
+"""
 import redis.asyncio as redis
-
-from app.config import get_settings
-
-settings = get_settings()
-logger = logging.getLogger(__name__)
-
-_pool: redis.ConnectionPool | None = None
+from app.config import settings
 
 
-async def get_redis_pool() -> redis.ConnectionPool:
-    global _pool
-    if _pool is None:
-        _pool = redis.ConnectionPool.from_url(
-            settings.redis_url,
-            decode_responses=True,
-            max_connections=50,
-        )
-    return _pool
+# ── 全局连接池 ──────────────────────
+redis_client: redis.Redis = redis.from_url(
+    settings.redis_url,
+    encoding="utf-8",
+    decode_responses=True,
+)
 
 
-async def get_redis() -> AsyncGenerator[redis.Redis, None]:
-    pool = await get_redis_pool()
-    async with redis.Redis(connection_pool=pool) as client:
-        yield client
+# ── 分布式锁（任务抢占用） ──────────
+async def acquire_lock(lock_key: str, expire: int = 10) -> bool:
+    """
+    尝试获取 Redis 分布式锁（SET NX EX）
+    成功返回 True，失败返回 False
+    """
+    return await redis_client.set(lock_key, "1", nx=True, ex=expire)
 
 
-class RedisLock:
-    """SETNX 分布式锁."""
-
-    def __init__(self, client: redis.Redis, key: str, ttl_sec: int = 60):
-        self.client = client
-        self.key = key
-        self.ttl = ttl_sec
-        self._token: str | None = None
-
-    async def acquire(self) -> bool:
-        self._token = str(time.time_ns())
-        return bool(await self.client.set(self.key, self._token, nx=True, ex=self.ttl))
-
-    async def release(self) -> None:
-        if self._token is None:
-            return
-        # Lua script: only delete if value matches (we own the lock)
-        lua = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end"
-        await self.client.eval(lua, 1, self.key, self._token)
-
-    async def extend(self, extra_sec: int) -> None:
-        if self._token is None:
-            return
-        lua = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('expire', KEYS[1], ARGV[2]) else return 0 end"
-        await self.client.eval(lua, 1, self.key, self._token, extra_sec)
+async def release_lock(lock_key: str):
+    """释放锁"""
+    await redis_client.delete(lock_key)
 
 
-class RateLimiter:
-    """滑动窗口频率限制."""
+# ── 心跳缓存 ────────────────────────
+HEARTBEAT_PREFIX = "node:heartbeat:"
+LOCK_PREFIX = "task:lock:"
 
-    def __init__(self, client: redis.Redis, key: str, limit: int, window_sec: int = 60):
-        self.client = client
-        self.key = key
-        self.limit = limit
-        self.window = window_sec
+async def set_heartbeat(node_id: str):
+    """记录节点心跳，TTL = 心跳超时时间"""
+    key = f"{HEARTBEAT_PREFIX}{node_id}"
+    await redis_client.set(key, int(time.time()), ex=settings.task_heartbeat_timeout)
 
-    async def is_allowed(self) -> bool:
-        now = time.time_ns()
-        window_start = now - self.window * 1_000_000_000
-        pipe = self.client.pipeline()
-        pipe.zremrangebyscore(self.key, "-inf", window_start)
-        pipe.zcard(self.key)
-        pipe.zadd(self.key, {str(now): now})
-        pipe.expire(self.key, self.window + 1)
-        counts = await pipe.execute()
-        return counts[1] < self.limit
+
+async def is_node_online(node_id: str) -> bool:
+    """检查节点是否在心跳超时窗口内"""
+    key = f"{HEARTBEAT_PREFIX}{node_id}"
+    return await redis_client.exists(key) == 1
+
+
+# ── 领取频率限制 ────────────────────
+async def check_claim_rate(node_id: str) -> bool:
+    """
+    检查节点领取频率是否超限
+    返回 True = 可以领取，False = 需要等待
+    """
+    key = f"node:claim:{node_id}"
+    last = await redis_client.get(key)
+    if last is None:
+        await redis_client.set(key, "1", ex=settings.task_claim_interval)
+        return True
+    return False
+
+
+# 延迟导入 time（避免循环导入）
+import time

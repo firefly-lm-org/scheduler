@@ -1,85 +1,50 @@
-"""分层配置：环境变量 + .env 文件，pydantic-settings 自动校验."""
-from functools import lru_cache
-from typing import Optional
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
-
-
-class PostgresSettings(BaseSettings):
-    host: str = Field(default="localhost", alias="POSTGRES_HOST")
-    port: int = Field(default=5432, alias="POSTGRES_PORT")
-    user: str = Field(default="firefly", alias="POSTGRES_USER")
-    password: str = Field(default="changeme", alias="POSTGRES_PASSWORD")
-    name: str = Field(default="firefly_scheduler", alias="POSTGRES_DB")
-
-    @property
-    def url(self) -> str:
-        return f"postgresql+asyncpg://{self.user}:{self.password}@{self.host}:{self.port}/{self.name}"
-
-
-class RedisSettings(BaseSettings):
-    host: str = Field(default="localhost", alias="REDIS_HOST")
-    port: int = Field(default=6379, alias="REDIS_PORT")
-    db: int = Field(default=0, alias="REDIS_DB")
-
-    @property
-    def url(self) -> str:
-        return f"redis://{self.host}:{self.port}/{self.db}"
-
-
-class MinIOSettings(BaseSettings):
-    endpoint: str = Field(default="localhost:9000", alias="MINIO_ENDPOINT")
-    access_key: str = Field(default="firefly_admin", alias="MINIO_ACCESS_KEY")
-    secret_key: str = Field(default="changeme", alias="MINIO_SECRET_KEY")
-    bucket_packages: str = Field(default="task-packages", alias="MINIO_BUCKET_PACKAGES")
-    bucket_results: str = Field(default="results", alias="MINIO_BUCKET_RESULTS")
-    secure: bool = Field(default=False, alias="MINIO_SECURE")
-
-
-class JWTSettings(BaseSettings):
-    secret_key: str = Field(default="CHANGE_ME_IN_PRODUCTION", alias="JWT_SECRET_KEY")
-    algorithm: str = "HS256"
-    access_expire_minutes: int = Field(default=30, alias="JWT_ACCESS_EXPIRE_MINUTES")
-    refresh_expire_days: int = Field(default=7, alias="JWT_REFRESH_EXPIRE_DAYS")
+"""
+firefly-scheduler · 配置管理
+分层配置：环境变量 > .env 文件 > 默认值
+"""
+import os
+from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
-    )
+    # ── 环境 ──────────────────────────
+    env: str = "development"
 
-    # App
-    app_name: str = "Firefly Scheduler"
-    debug: bool = False
+    # ── 数据库 ────────────────────────
+    database_url: str = "postgresql+asyncpg://firefly:firefly123@localhost:5432/firefly"
 
-    # Sub-configs
-    postgres: PostgresSettings = Field(default_factory=PostgresSettings)
-    redis: RedisSettings = Field(default_factory=RedisSettings)
-    minio: MinIOSettings = Field(default_factory=MinIOSettings)
-    jwt: JWTSettings = Field(default_factory=JWTSettings)
+    # ── Redis ──────────────────────────
+    redis_url: str = "redis://localhost:6379/0"
 
-    # Scheduler policy
-    task_claim_ttl_sec: int = 600        # 10 min → claimed 超时回 pending
-    task_run_ttl_sec: int = 7200         # 2 h → running 超时回收
-    heartbeat_interval_sec: int = 30
-    task_max_retries: int = 3
-    node_offline_sec: int = 60            # 60s 无心跳 → offline
-    node_recover_interval_sec: int = 21600  # 6 h → 信誉恢复
+    # ── MinIO ──────────────────────────
+    minio_endpoint: str = "localhost:9000"
+    minio_access_key: str = "firefly"
+    minio_secret_key: str = "firefly123456"
+    minio_bucket: str = "firefly-tasks"
+    minio_secure: bool = False
 
-    # Rate limits
-    rate_limit_claim_per_min: int = 6
-    rate_limit_heartbeat_per_min: int = 60
-    rate_limit_register_per_hour: int = 10
+    # ── JWT ────────────────────────────
+    jwt_secret: str = "change-me"
+    jwt_access_expire: int = 86400       # 24 小时
+    jwt_refresh_expire: int = 604800     # 7 天
 
-    @property
-    def database_url(self) -> str:
-        return self.postgres.url
+    # ── 任务调度参数 ──────────────────
+    task_claim_interval: int = 10        # 节点最短领取间隔（秒）
+    task_heartbeat_timeout: int = 90     # 心跳超时（秒）→ 判定离线
+    task_progress_interval: int = 60     # 进度上报间隔（秒）
+    task_max_retries: int = 3            # 任务最大重试次数
 
-    @property
-    def redis_url(self) -> str:
-        return self.redis.url
+    class Config:
+        env_file = ".env"
+        case_sensitive = False
 
 
-@lru_cache
-def get_settings() -> Settings:
-    return Settings()
+# 全局单例
+settings = Settings()
+
+# ── 导出常用常量（方便其他模块 import） ──
+ENV = settings.env
+DATABASE_URL = settings.database_url
+REDIS_URL = settings.redis_url
+TASK_MAX_RETRIES = settings.task_max_retries
+TASK_HEARTBEAT_TIMEOUT = settings.task_heartbeat_timeout
