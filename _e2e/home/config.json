@@ -1,0 +1,10 @@
+{
+  "server_url": "http://localhost:8000",
+  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjOWM2MTU5My03NTNiLTQ2YjEtYTk0Ny0zZTMyZTAxMTk3ODYiLCJ1c2VybmFtZSI6ImUyZV8xNzg0ODkyMzE1IiwidHlwZSI6ImFjY2VzcyIsImlhdCI6MTc4NDg2MzUxNywiZXhwIjoxNzg0OTQ5OTE3fQ.V6-4356gnE8ThN4Bx3_gmR7SimIb04eGAgyQP4kVcS4",
+  "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjOWM2MTU5My03NTNiLTQ2YjEtYTk0Ny0zZTMyZTAxMTk3ODYiLCJ0eXBlIjoicmVmcmVzaCIsImlhdCI6MTc4NDg2MzUxNywiZXhwIjoxNzg1NDY4MzE3fQ.ujluDekVEeGwsnTxU7jWKPvyO3IOyEthmm-TOSTZ7HA",
+  "user_id": "c9c61593-753b-46b1-a947-3e32e0119786",
+  "username": "e2e_1784892315",
+  "node_id": "cce1e9de-c0c0-454a-a032-d5d49e343da7",
+  "node_name": "e2e-pc",
+  "status": "stopped"
+}

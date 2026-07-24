@@ -1,0 +1,34 @@
+┌───────────────────── Traceback (most recent call last) ─────────────────────┐
+│ D:\firefly-client\firefly-client\app\main.py:115 in start                   │
+│                                                                             │
+│   112 │   │   running = False                                               │
+│   113 │   │   console.print("\n[yellow]🛑 正在停止...[/yellow]")            │
+│   114 │                                                                     │
+│ > 115 │   loop.add_signal_handler(signal.SIGINT, signal_handler)            │
+│   116 │   loop.add_signal_handler(signal.SIGTERM, signal_handler)           │
+│   117 │                                                                     │
+│   118 │   try:                                                              │
+│                                                                             │
+│ ┌───────────────────────────── locals ──────────────────────────────┐       │
+│ │ loop = <ProactorEventLoop running=False closed=False debug=False> │       │
+│ └───────────────────────────────────────────────────────────────────┘       │
+│                                                                             │
+│ D:\Program                                                                  │
+│ Files\QClaw\v0.2.34.621\resources\python\Lib\asyncio\events.py:578 in       │
+│ add_signal_handler                                                          │
+│                                                                             │
+│   575 │   # Signal handling.                                                │
+│   576 │                                                                     │
+│   577 │   def add_signal_handler(self, sig, callback, *args):               │
+│ > 578 │   │   raise NotImplementedError                                     │
+│   579 │                                                                     │
+│   580 │   def remove_signal_handler(self, sig):                             │
+│   581 │   │   raise NotImplementedError                                     │
+│                                                                             │
+│ ┌───────────────────────────── locals ──────────────────────────────┐       │
+│ │ args = ()                                                         │       │
+│ │ self = <ProactorEventLoop running=False closed=False debug=False> │       │
+│ │  sig = <Signals.SIGINT: 2>                                        │       │
+│ └───────────────────────────────────────────────────────────────────┘       │
+└─────────────────────────────────────────────────────────────────────────────┘
+NotImplementedError
