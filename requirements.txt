@@ -16,6 +16,7 @@ minio==7.2.8
 # ── 安全 / 认证 ───────────────────────────
 pyjwt==2.9.0
 passlib[bcrypt]==1.7.4
+bcrypt==4.0.1  # pin: bcrypt>=4.1 breaks passlib backend detection
 python-multipart==0.0.9
 
 # ── 数据校验 ──────────────────────────────
