@@ -75,6 +75,8 @@ async def create_task(
         max_retries=max_retries,
         task_package_url=task_package_url,
         config_json=json.dumps(config_json),
+        model_version="v0.1",
+        aggregation_key="default",
     )
     db.add(task)
     await db.flush()

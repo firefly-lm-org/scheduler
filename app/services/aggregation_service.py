@@ -83,6 +83,7 @@ async def find_ready_aggregation(db: AsyncSession) -> dict[str, list[dict[str, A
                     "task_id": t.id,
                     "node_id": t.claimed_by,
                     "result_sha256": t.result_sha256,
+                    "result_object_name": t.result_object_name,
                     "completed_at": t.completed_at,
                     "base_contribution": t.base_contribution,
                     "quality_score": t.quality_score,
@@ -144,7 +145,8 @@ async def aggregate_for_version(
 
         for info in task_infos:
             task_id = info["task_id"]
-            object_name = f"results/{task_id}/result.zip"
+            # 优先用 DB 记录的真实对象名，兼容旧数据回退到约定路径
+            object_name = info.get("result_object_name") or f"results/{task_id}/result.zip"
             local_zip = local_ckpt_dir / f"{task_id}.zip"
 
             try:
@@ -411,6 +413,7 @@ def _merge_safetensors_sync(
 ) -> None:
     """同步版本的 safetensors 合并（线程内执行）"""
     import numpy as np
+    from safetensors import safe_open
 
     try:
         with safe_open(path, framework="numpy") as f:
@@ -425,23 +428,20 @@ def _merge_safetensors_sync(
 
 
 async def _save_aggregated_weights(weight_data: dict, output_dir: str) -> None:
-    """将聚合后的权重保存为 safetensors 文件"""
+    """将聚合后的权重保存为 safetensors 文件（numpy 后端，无需 torch）"""
     try:
-        from safetensors import safe_open
-        from safetensors.torch import save_file
+        import numpy as np
+        from safetensors.numpy import save_file
     except ImportError:
         print("[Aggregation] safetensors not installed, saving as numpy fallback")
         await _save_aggregated_weights_numpy(weight_data, output_dir)
         return
 
-    import torch
-
     tensors = {}
     for key, arr in weight_data.items():
         if hasattr(arr, "numpy"):
-            tensors[key] = torch.from_numpy(arr.numpy())
-        else:
-            tensors[key] = torch.tensor(arr)
+            arr = arr.numpy()
+        tensors[key] = np.ascontiguousarray(arr)
 
     out_path = os.path.join(output_dir, "aggregated.safetensors")
     await asyncio.to_thread(save_file, tensors, out_path)
