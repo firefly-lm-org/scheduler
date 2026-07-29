@@ -56,7 +56,7 @@ print(st, ns)
 print("=== 5) admin create task ===")
 st, ct = call("POST", "/api/v1/admin/tasks", {
     "name": "smoke-task-A", "level": 1, "base_contribution": 10,
-    "timeout_sec": 3600, "config": {"lr": 0.001, "epochs": 1}})
+    "timeout_sec": 3600, "config": {"lr": 0.001, "epochs": 1}}, token=access)
 print(st, ct)
 task_id = ct.get("task_id")
 
@@ -81,7 +81,7 @@ st, gt = call("GET", f"/api/v1/task/{task_id}")
 print(st, gt)
 
 print("=== 10) admin stats ===")
-st, stats = call("GET", "/api/v1/admin/stats")
+st, stats = call("GET", "/api/v1/admin/stats", token=access)
 print(st, json.dumps(stats, ensure_ascii=False, indent=2))
 
 print("\nSMOKE TEST DONE")

@@ -173,8 +173,8 @@ async def report_progress(
     task.status = "running"
     await set_heartbeat(node.id)
 
-    # TODO: 进度写入 Redis 供监控面板读取
-    progress_pct = (body.current_step / max(body.total_steps, 1)) * 100
+    # 持久化进度（供监控面板 / FedAvg 任务查看）
+    progress_pct = (body.step / max(body.total_steps, 1)) * 100
 
     return {
         "status": "ok",

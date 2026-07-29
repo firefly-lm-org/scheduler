@@ -143,7 +143,11 @@ async def get_stats(db: AsyncSession = Depends(get_db), _user: User = Depends(ge
 # POST /tasks/{task_id}/reset  重置失败任务
 # ─────────────────────────────────────
 @router.post("/tasks/{task_id}/reset")
-async def reset_task(task_id: str, db: AsyncSession = Depends(get_db), _user: User = Depends(get_current_user)):
+async def reset_task(
+    task_id: str,
+    db: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
     """将 failed 任务重置为 pending，重新进入队列"""
     result = await db.execute(select(Task).where(Task.id == task_id))
     task = result.scalar_one_or_none()

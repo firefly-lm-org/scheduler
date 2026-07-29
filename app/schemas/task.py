@@ -18,11 +18,16 @@ class TaskClaimResponse(BaseModel):
 
 
 class TaskProgressRequest(BaseModel):
-    """节点上报训练进度"""
-    current_step: int = Field(..., ge=0)
-    total_steps: int = Field(..., ge=1)
-    loss: Optional[float] = None
-    peak_vram_mb: Optional[float] = None
+    """节点上报训练进度（firefly-client v0.2 每10步调用一次）"""
+    task_id: Optional[str] = Field(None, description="任务ID，可省略（服务端从 claimed_by 推导）")
+    step: int = Field(..., ge=0, alias="current_step", description="当前训练步数")
+    total_steps: int = Field(..., ge=1, description="总步数")
+    progress_pct: float = Field(0.0, ge=0, le=100, description="进度百分比 0~100")
+    loss: Optional[float] = Field(None, description="当前 loss 值")
+    peak_vram_mb: Optional[float] = Field(None, description="峰值显存 MB")
+
+    class Config:
+        populate_by_name = True  # 允许用 step 或 current_step
 
 
 class TaskSubmitRequest(BaseModel):
