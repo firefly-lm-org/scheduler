@@ -16,7 +16,7 @@ from app.services.background_tasks import (
     reputation_recovery,
     aggregation_loop,
 )
-from app.routers import auth, node, task, admin, aggregation
+from app.routers import auth, node, task, admin, aggregation, reputation, signal
 
 
 # ─────────────────────────────────────
@@ -25,15 +25,15 @@ from app.routers import auth, node, task, admin, aggregation
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用启动/关闭时的初始化与清理"""
-    print("🟢 [Firefly] Starting up...")
+    print("[Firefly] Starting up...")
 
     # 1. 初始化数据库表
     await init_db()
-    print("  ✓ Database tables ready")
+    print("  [OK] Database tables ready")
 
     # 2. 确保 MinIO bucket 存在
     await ensure_bucket()
-    print("  ✓ MinIO bucket ready")
+    print("  [OK] MinIO bucket ready")
 
     # 3. 启动后台任务
     tasks = [
@@ -42,17 +42,17 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(reputation_recovery(), name="reputation_recovery"),
         asyncio.create_task(aggregation_loop(), name="aggregation_loop"),
     ]
-    print("  ✓ Background tasks started")
-    print("🔥 Firefly Scheduler is LIVE")
+    print("  [OK] Background tasks started")
+    print("[Firefly] Scheduler is LIVE")
 
     yield
 
     # ── 关闭清理 ──
-    print("🔴 [Firefly] Shutting down...")
+    print("[Firefly] Shutting down...")
     for t in tasks:
         t.cancel()
     await close_db()
-    print("  ✓ Cleanup complete")
+    print("  [OK] Cleanup complete")
 
 
 # ─────────────────────────────────────
@@ -82,6 +82,8 @@ app.include_router(node.router, prefix="", tags=["Node"])
 app.include_router(task.router, prefix="", tags=["Task"])
 app.include_router(admin.router, prefix="", tags=["Admin"])
 app.include_router(aggregation.router, prefix="", tags=["Admin · Aggregation"])
+app.include_router(reputation.router, prefix="", tags=["Reputation"])
+app.include_router(signal.router, prefix="", tags=["Contribution · Signal"])
 
 
 # ─────────────────────────────────────
