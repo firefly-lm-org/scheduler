@@ -1,113 +1,177 @@
-# Firefly Scheduler · 萤火虫调度中心
+# Firefly Scheduler
 
-> 全球分布式志愿算力驱动的 AI 训练调度系统 · v0.1 微光版
+> 分布式联邦学习调度系统 v0.6 — 萤火虫计划核心组件
 
 ## 快速开始
 
-### 前置条件
-- Docker + Docker Compose（推荐）
-- 或：Python 3.12 + PostgreSQL 15 + Redis 7 + MinIO
+### 前提条件
 
-### Docker 一键启动（推荐）
+- Python 3.10+
+- PostgreSQL 15+ / SQLite（开发模式）
+- Redis 7+（可选，本地开发使用内存 mock）
+- NVIDIA GPU（≥8GB VRAM）用于训练节点
 
-```bash
-# 1. 克隆仓库
-git clone https://github.com/firefly-lm-org/firefly-scheduler.git
-cd firefly-scheduler
-
-# 2. 复制环境变量
-cp .env.example .env
-# 编辑 .env，修改 JWT_SECRET 为随机强密钥
-
-# 3. 启动全部服务
-docker compose up -d
-
-# 4. 查看日志
-docker compose logs -f api
-
-# 5. 访问 API 文档
-open http://localhost:8000/docs
-```
-
-### 本地开发（不用 Docker）
+### 安装
 
 ```bash
-# 1. 安装依赖
-python -m venv venv && source venv/bin/activate
+git clone git@github.com:firefly-lm-org/scheduler.git
+cd scheduler
 pip install -r requirements.txt
+```
 
-# 2. 确保 PostgreSQL / Redis / MinIO 已运行
-# （可用 docker-compose 只启动这三个服务）
+### 启动调度中心
 
-# 3. 启动 API
+**开发模式（SQLite，无需 PostgreSQL）：**
+
+```bash
+python -m app.main
+```
+
+**生产模式（PostgreSQL + Redis）：**
+
+```bash
 cp .env.example .env
-uvicorn app.main:app --reload --port 8000
+# 编辑 .env，修改 DATABASE_URL 和 REDIS_URL
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
 ```
 
-## API 端点一览
+访问 API 文档：http://localhost:8000/docs
 
-| 模块 | 方法 | 路径 | 说明 |
+### 节点认领训练任务
+
+```bash
+# 1. 注册节点
+curl -X POST http://localhost:8000/api/v1/nodes/register \
+  -H "Content-Type: application/json" \
+  -d '{"name":"my-gpu-node","hardware":"RTX 4090 24GB"}'
+
+# 2. 认领任务
+curl -X POST http://localhost:8000/api/v1/tasks/claim \
+  -H "Authorization: Bearer <node_token>" \
+  -d '{"domain":"law"}'
+
+# 3. 上报进度
+curl -X POST http://localhost:8000/api/v1/tasks/progress \
+  -H "Authorization: Bearer <node_token>" \
+  -d '{"task_id":"<task_id>","progress_pct":50}'
+
+# 4. 完成任务
+curl -X POST http://localhost:8000/api/v1/tasks/complete \
+  -H "Authorization: Bearer <node_token>" \
+  -d '{"task_id":"<task_id>","final_loss":0.38}'
+```
+
+### 查看节点状态
+
+```bash
+# 节点信誉分
+curl http://localhost:8000/api/v1/reputation/my-gpu-node
+
+# 节点信号统计
+curl http://localhost:8000/api/v1/contrib/stats/my-gpu-node
+
+# 调度中心统计
+curl http://localhost:8000/api/v1/admin/stats
+```
+
+### 下载聚合权重
+
+```bash
+# 下载最新聚合权重
+curl -O http://localhost:8000/api/v1/weights/latest
+```
+
+## 架构
+
+```
+┌─────────────────────────────────────────────────────┐
+│              Firefly Scheduler (调度中心)            │
+│                                                     │
+│  ┌──────────┐  ┌──────────┐  ┌──────────────────┐  │
+│  │  信誉分  │  │  信号回流 │  │  权重聚合 FedAvg │  │
+│  │ Reputation│  │  Signal  │  │                  │  │
+│  └──────────┘  └──────────┘  └──────────────────┘  │
+│                                                     │
+│  ┌──────────────────────────────────────────────┐  │
+│  │  任务调度: claim → train → complete → stats  │  │
+│  └──────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────┘
+           │                    ▲
+           ▼                    │
+  ┌────────────────┐    ┌──────────────────┐
+  │ GPU 训练节点 A  │    │ GPU 训练节点 B   │
+  │ (Law Domain)   │    │ (Medical Domain) │
+  │ RTX 4090       │    │ RTX 4090         │
+  └────────────────┘    └──────────────────┘
+```
+
+## API 路由（v0.6，共 17 条）
+
+| 模块 | 方法 | 路由 | 说明 |
 |------|------|------|------|
-| Auth | POST | `/api/v1/auth/register` | 用户注册 |
-| Auth | POST | `/api/v1/auth/login` | 用户登录 |
-| Auth | POST | `/api/v1/auth/refresh` | 刷新 Token |
-| Node | POST | `/api/v1/node/register` | 注册节点 |
-| Node | POST | `/api/v1/node/heartbeat` | 心跳上报 |
-| Node | GET  | `/api/v1/node/status` | 查询节点状态 |
-| Task | POST | `/api/v1/task/claim` | 领取任务 |
-| Task | POST | `/api/v1/task/progress` | 上报进度 |
-| Task | POST | `/api/v1/task/submit` | 提交结果 |
-| Task | GET  | `/api/v1/task/{id}` | 查询任务状态 |
-| Admin | POST | `/api/v1/admin/tasks` | 创建任务 |
-| Admin | GET  | `/api/v1/admin/stats` | 全局统计 |
-| Admin | POST | `/api/v1/admin/tasks/{id}/reset` | 重置失败任务 |
+| 认证 | POST | `/api/v1/auth/register` | 注册 |
+| 认证 | POST | `/api/v1/auth/login` | 登录 |
+| 节点 | POST | `/api/v1/nodes/register` | 注册节点 |
+| 节点 | POST | `/api/v1/nodes/heartbeat` | 节点心跳 |
+| 节点 | GET | `/api/v1/nodes` | 节点列表 |
+| 任务 | GET | `/api/v1/tasks/pending` | 待领取任务 |
+| 任务 | POST | `/api/v1/tasks/claim` | 认领任务 |
+| 任务 | POST | `/api/v1/tasks/progress` | 上报进度 |
+| 任务 | POST | `/api/v1/tasks/complete` | 完成任务 |
+| 任务 | GET | `/api/v1/tasks` | 任务列表 |
+| 信誉分 | GET | `/api/v1/reputation/{node_id}` | 查询信誉分 |
+| 信誉分 | POST | `/api/v1/reputation/adjust` | 调整信誉分 |
+| 信誉分 | GET | `/api/v1/reputation/{node_id}/history` | 信誉分历史 |
+| 信号回流 | POST | `/api/v1/contrib/signal` | 上报训练信号 |
+| 信号回流 | GET | `/api/v1/contrib/stats/{node_id}` | 节点信号统计 |
+| 管理 | GET | `/api/v1/admin/stats` | 调度统计 |
+| 健康 | GET | `/health` | 健康检查 |
 
-## 项目结构
+## 信誉分规则
 
-```
-firefly-scheduler/
-├── app/
-│   ├── __init__.py
-│   ├── main.py              # FastAPI 入口 + 生命周期
-│   ├── config.py            # 配置管理
-│   ├── database.py          # 异步引擎 + 会话
-│   ├── models/              # ORM 模型
-│   │   ├── user.py
-│   │   ├── node.py
-│   │   ├── task.py
-│   │   └── contribution.py
-│   ├── schemas/             # Pydantic 请求/响应
-│   │   ├── auth.py
-│   │   ├── node.py
-│   │   └── task.py
-│   ├── routers/             # API 路由
-│   │   ├── auth.py
-│   │   ├── node.py
-│   │   ├── task.py
-│   │   └── admin.py
-│   ├── services/            # 业务逻辑
-│   │   ├── contribution_service.py
-│   │   └── background_tasks.py
-│   └── utils/               # 工具函数
-│       ├── security.py
-│       ├── redis_client.py
-│       └── minio_client.py
-├── docker-compose.yml
-├── Dockerfile
-├── requirements.txt
-├── .env.example
-├── .gitignore
-└── README.md
+| 事件 | 信誉分变化 |
+|------|-----------|
+| 初始注册 | 100 分 |
+| 任务完成（正常） | +5 分 |
+| 任务完成（优秀 loss） | +7 分 |
+| 任务超时 | -10 分 |
+| 虚假数据 | -50 分 |
+| 连续失败 ≥3 次 | -5 分 |
+| 最低分 | 0 分（封禁） |
+| 单次上限 | ±20 分 |
+
+## 部署
+
+### 阿里云轻量服务器
+
+```bash
+# SSH 连接服务器
+ssh root@106.14.220.169
+
+# 进入调度中心目录
+cd /root/scheduler
+
+# 安装依赖
+pip install fastapi uvicorn sqlalchemy python-multipart httpx passlib pyjwt bcrypt
+
+# 启动（Python 3.6 兼容模式）
+PYTHONDONTWRITEBYTECODE=1 python3 -B main.py
 ```
 
-## 开发路线图
+### Docker 部署
 
-| 版本 | 目标 | 状态 |
-|------|------|------|
-| v0.1 微光版 | 调度闭环验证（模拟任务） | 🚧 进行中 |
-| v0.5 训练版 | 接入真实 QLoRA 微调 | 📋 待启动 |
-| v1.0 成炬版 | 发布社区持续优化版 7B 模型 | 📋 规划中 |
+```bash
+git clone git@github.com:firefly-lm-org/scheduler.git
+cd scheduler
+docker compose up -d
+```
 
-## 许可证
+## 相关仓库
 
-Apache 2.0
+- [firefly-lm-org/firefly-client](https://github.com/firefly-lm-org/firefly-client) — 节点训练客户端
+- [firefly-lm-org/docs](https://github.com/firefly-lm-org/docs) — 文档与基准测试
+- [firefly-lm-org/website](https://github.com/firefly-lm-org/website) — 官网
+
+## License
+
+MIT License

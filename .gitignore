@@ -18,10 +18,12 @@ env/
 .vscode/
 *.swp
 *.swo
+*.sublime-*
 
 # Environment variables
 .env
 .env.local
+.env.*.local
 
 # OS
 .DS_Store
@@ -36,3 +38,24 @@ logs/
 
 # MinIO data (local dev)
 minio-data/
+
+# Training outputs
+*.safetensors
+*.bin
+checkpoint-*/
+train_output/
+adapters/
+
+# SQLite (local dev)
+*.db
+
+# SSH keys
+*.pem
+*.key
+!*.pem.example
+
+# Temporary files
+*.tmp
+*.bak
+*.orig
+*~
