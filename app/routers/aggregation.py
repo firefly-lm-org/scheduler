@@ -239,3 +239,88 @@ async def get_aggregation_status(
         "threshold": settings.aggregation_threshold,
         "versions": list(all_versions.values()),
     }
+
+
+# ─────────────────────────────────────
+# 公开路由（无需鉴权，供节点下载聚合权重）
+# ─────────────────────────────────────
+public_router = APIRouter(prefix="/api/v1/aggregation", tags=["Aggregation · Public"])
+
+
+@public_router.get("/download")
+async def download_aggregated_weights(
+    round: int = 0,
+    model_version: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    公开接口：下载聚合权重。
+    - round=0 或不传：返回最新完成的聚合
+    - round=N：返回第 N 轮聚合（按创建时间排序）
+    - model_version：可选，过滤特定版本
+    """
+    query = (
+        select(AggregationRecord)
+        .where(AggregationRecord.status == "completed")
+        .order_by(desc(AggregationRecord.created_at))
+    )
+    if model_version:
+        query = query.where(AggregationRecord.model_version == model_version)
+
+    result = await db.execute(query)
+    records = list(result.scalars().all())
+
+    if not records:
+        raise HTTPException(
+            status_code=404,
+            detail="No completed aggregation records found. Aggregation triggers after enough nodes submit results.",
+        )
+
+    # round 索引（1-based）
+    if round and round <= len(records):
+        record = records[round - 1]
+    else:
+        record = records[0]  # 最新
+
+    if not record.aggregated_checkpoint_url:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Aggregation {record.id} completed but checkpoint URL is empty.",
+        )
+
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url=record.aggregated_checkpoint_url, status_code=302)
+
+
+@public_router.get("/list")
+async def list_aggregations(
+    limit: int = 20,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    公开接口：列出已完成的聚合记录（摘要）。
+    供节点查询有哪些可下载的聚合权重。
+    """
+    result = await db.execute(
+        select(AggregationRecord)
+        .where(AggregationRecord.status == "completed")
+        .order_by(desc(AggregationRecord.created_at))
+        .limit(limit)
+    )
+    records = result.scalars().all()
+
+    return {
+        "total": len(records),
+        "aggregations": [
+            {
+                "id": r.id,
+                "model_version": r.model_version,
+                "num_participants": r.num_participants,
+                "num_tasks": r.num_tasks,
+                "has_checkpoint": bool(r.aggregated_checkpoint_url),
+                "sha256": r.aggregated_sha256[:16] + "..." if r.aggregated_sha256 else None,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in records
+        ],
+    }

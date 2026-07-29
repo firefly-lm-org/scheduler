@@ -17,6 +17,7 @@ from app.services.background_tasks import (
     aggregation_loop,
 )
 from app.routers import auth, node, task, admin, aggregation, reputation, signal
+from app.routers.aggregation import public_router as aggregation_public_router
 
 
 # ─────────────────────────────────────
@@ -84,6 +85,7 @@ app.include_router(admin.router, prefix="", tags=["Admin"])
 app.include_router(aggregation.router, prefix="", tags=["Admin · Aggregation"])
 app.include_router(reputation.router, prefix="", tags=["Reputation"])
 app.include_router(signal.router, prefix="", tags=["Contribution · Signal"])
+app.include_router(aggregation_public_router, prefix="", tags=["Aggregation · Public"])
 
 
 # ─────────────────────────────────────
