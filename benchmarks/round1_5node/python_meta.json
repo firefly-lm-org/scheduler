@@ -1,0 +1,23 @@
+{
+  "task_id": "local_python",
+  "model_base": "/root/model_cache/models/Qwen--Qwen2.5-1.5B-Instruct/snapshots/master",
+  "lora_r": 8,
+  "lora_alpha": 16,
+  "lora_dropout": 0.05,
+  "target_modules": [
+    "q_proj",
+    "v_proj"
+  ],
+  "max_seq_length": 512,
+  "per_device_batch_size": 1,
+  "grad_accum": 4,
+  "lr": 0.0002,
+  "max_steps": 60,
+  "final_loss": 1.769,
+  "adapter_path": "/root/.firefly/train_output/local_python/lora.safetensors",
+  "elapsed_sec": 45.9,
+  "framework": "transformers+peft+trl",
+  "torch_version": "2.4.1+cu121",
+  "vram_gb": 25.262096384,
+  "log_loss": 1.77
+}

@@ -1,0 +1,18 @@
+{
+  "algorithm": "fedavg_4node_ring",
+  "method": "ring (AB then ABCD)",
+  "nodes": 4,
+  "weights": [
+    0.5,
+    0.5,
+    0.5,
+    0.5
+  ],
+  "domains": [
+    "law(10)",
+    "medical(31)",
+    "python(30)",
+    "tax(29)"
+  ],
+  "note": "v0.3+ ring FedAvg - domain_python.jsonl + domain_tax.jsonl"
+}

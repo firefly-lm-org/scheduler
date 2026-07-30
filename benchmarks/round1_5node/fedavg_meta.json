@@ -1,0 +1,27 @@
+{
+  "nodes": 5,
+  "domains": [
+    "law",
+    "education",
+    "medical",
+    "python",
+    "tax"
+  ],
+  "weights": [
+    0.2,
+    0.2,
+    0.2,
+    0.2,
+    0.2
+  ],
+  "algorithm": "fedavg_equal_weight",
+  "input_sha256": {
+    "law": "ff2bdcf0efdc624e2c558b604a52ea553775e2b5e10125b54a750e14212771c1",
+    "edu": "119fc3c9fa14543c6e06b93de907ef30203597f2e040a492be2a980792177a38",
+    "med": "770ca17ec7978353...",
+    "py": "76dc8e2f90f81744...",
+    "tax": "eda52cd10d61f5ae..."
+  },
+  "output_sha256": "c57fa9531c7259a008a9aa088825ea747206c8995c9a40063b4e75d9778d33b0",
+  "framework": "transformers+peft+trl"
+}

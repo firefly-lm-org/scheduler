@@ -1,0 +1,25 @@
+{
+  "algorithm": "fedavg_4node_weighted",
+  "method": "weighted by sample count",
+  "nodes": 4,
+  "node_domains": [
+    "law",
+    "medical",
+    "python",
+    "tax"
+  ],
+  "sample_counts": {
+    "law": 10,
+    "medical": 31,
+    "python": 30,
+    "tax": 29
+  },
+  "weights": {
+    "law": 0.1,
+    "medical": 0.31,
+    "python": 0.3,
+    "tax": 0.29
+  },
+  "total_samples": 100,
+  "note": "v0.4 weighted FedAvg - Law:10/Medical:31/Python:30/Tax:29"
+}
